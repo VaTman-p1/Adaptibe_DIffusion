@@ -1,0 +1,34 @@
+lr: [4e-4]
+cond_dim: [128]
+channels:
+  - [32, 64, 128, 256]
+
+yaw_w: [0.2]
+goal_w: [0.2]
+path_w: [0.2]
+consist_w: [0.35]
+vconsist_w: [0.35]
+path_t_thresh: [0.2]
+
+timesteps: [100]
+beta_schedule: ["squaredcos_cap_v2"]
+batch_size: [128]
+epochs: [40]
+weight_decay: [1e-4]
+
+dataset:
+  - 
+    - csv_path: "trajectory_diffusion/V2_01_easy.csv"
+      pos_columns: [' p_RS_R_x [m]',' p_RS_R_y [m]',' p_RS_R_z [m]']
+      quat_columns: [' q_RS_x []',' q_RS_y []',' q_RS_z []',' q_RS_w []']
+      time_column: "#timestamp"
+
+    - csv_path: "trajectory_diffusion/V2_02_medium.csv"
+      pos_columns: [' p_RS_R_x [m]',' p_RS_R_y [m]',' p_RS_R_z [m]']
+      quat_columns: [' q_RS_x []',' q_RS_y []',' q_RS_z []',' q_RS_w []']
+      time_column: "#timestamp"
+
+    - csv_path: "trajectory_diffusion/V2_03_difficult.csv"
+      pos_columns: [' p_RS_R_x [m]',' p_RS_R_y [m]',' p_RS_R_z [m]']
+      quat_columns: [' q_RS_x []',' q_RS_y []',' q_RS_z []',' q_RS_w []']
+      time_column: "#timestamp"
