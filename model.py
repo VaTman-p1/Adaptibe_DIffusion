@@ -24,7 +24,7 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb
     
 class ConditionEmbedder(nn.Module):
-    def __init__(self, cond_dim=128, context_size=25, num_cond = 3):
+    def __init__(self, cond_dim=128, context_size=25):
         super().__init__()
         
         # 1. Энкодер времени (стандарт для диффузии)
@@ -49,71 +49,58 @@ class ConditionEmbedder(nn.Module):
             nn.SiLU(),
             nn.Linear(256, cond_dim)
         )
-        
-        # 4. Финальный Fusion MLP
-        # Смешивает все эмбеды в один вектор нужной размерности
-        self.fusion = nn.Sequential(
-            nn.Linear(cond_dim * num_cond, cond_dim * 2),
-            nn.SiLU(),
-            nn.Linear(cond_dim * 2, cond_dim) 
-        )
+
 
     def forward(self, t, goal, context):
         t_e = self.time_mlp(t)
         g_e = self.goal_mlp(goal)
         c_e = self.context_mlp(context)
         
-        # Объединяем и перемешиваем
-        combined = torch.cat([t_e, g_e, c_e], dim=-1)
-        return self.fusion(combined)
+        return t_e, g_e, c_e
 
-class AdaGNResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, cond_dim_total, dropout=0.1):
+class FiLMResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, conddim, condtype = 'concat'):
         super().__init__()
-        # Вектор условий (t + goal + context + force) -> [B, 512]
-        # Мы проецируем его сразу в параметры для нормализации
+        self.condtype = condtype
         self.cond_mlp = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(cond_dim_total, out_channels * 2) 
+            nn.Linear(conddim, out_channels * 2) 
         )
         def get_groups(channels):
             if channels % 8 == 0:
                 return 8
-            # Если совсем мало или странное число (как 5), 
-            # используем 1 группу (фактически LayerNorm)
             return 1
-
-
-        self.norm1 = nn.GroupNorm(get_groups(in_channels), in_channels)
-        self.conv1 = nn.Conv1d(in_channels, out_channels, 3, padding=1)
-
-        self.dropout = nn.Dropout(dropout)
         
-        self.norm2 = nn.GroupNorm(get_groups(out_channels), out_channels)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, 3, padding=1)
+        
+        self.norm = nn.GroupNorm(get_groups(out_channels), out_channels)
         self.conv2 = nn.Conv1d(out_channels, out_channels, 3, padding=1)
         
         self.act = nn.SiLU()
         self.skip = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
-    def forward(self, x, fused_cond):
-        # 1. Первый этап свертки
-        h = self.norm1(x)
-        h = self.conv1(self.act(h))
+    def forward(self, x, cond):
 
-        # 2. Генерируем scale (gamma) и shift (beta) из t и остальных условий
-        # Мы используем .unsqueeze(-1) для применения ко всей длине траектории
-        cond_params = self.cond_mlp(fused_cond).unsqueeze(-1)
-        scale, shift = torch.chunk(cond_params, 2, dim=1)
+        h = self.conv1(x)
+        h = self.norm(h)
+        h = self.act(h)
         
-        # 3. Адаптивная нормализация (вместо обычного FiLM)
-        h = h * (1 + scale) + shift
-        h = self.dropout(h)
+        # cond_params = self.cond_mlp(fused_cond).unsqueeze(-1)
+        cond_params = self.cond_mlp(cond)
+        if self.condtype == 'concat':
+            scale, shift = torch.chunk(cond_params.unsqueeze(-1), 2, dim=1)
+            h = h * (1 + scale) + shift
+        else:
+            sum_cond = torch.sum(cond_params, dim = 1)
+            scale, shift = torch.chunk(sum_cond.unsqueeze(-1), 2, dim=1)
+            h = h * (1 + scale) + shift
 
-        # 4. Второй этап
-        h = self.norm2(h)
-        h = self.conv2(self.act(h))
 
-        return h + self.skip(x)
+        h = self.conv2(h)
+        h = self.norm(h)
+        h = self.act(h)
+
+        return h + self.skip(x), self.skip(x)
 
 
 
@@ -122,11 +109,18 @@ class UNet1D(nn.Module):
         self,
         in_channels=2,
         channels=[64, 128, 256],
-        cond_dim = 128, num_cond = 3
+        cond_dim = 128, num_cond = 3, 
+        condtype = 'concat'
     ):
         super().__init__()
 
         self.channels = channels
+        self.condtype = condtype
+        self.in_channels = in_channels
+        self.num_cond = num_cond
+
+        if self.condtype == 'concat':
+            cond_dim = int(num_cond*num_cond)
 
         self.cond_embedder = ConditionEmbedder(cond_dim=cond_dim, num_cond=num_cond)
 
@@ -134,41 +128,37 @@ class UNet1D(nn.Module):
         # ENCODER
         # -------------------------------
         self.down_blocks = nn.ModuleList()
-        self.downsamples = nn.ModuleList()
 
-        prev_c = in_channels
-        for c in channels:
+        prev_c = self.in_channels
+        for i, c in enumerate(channels):
+            is_last = i >= (len(channels) - 1)
             self.down_blocks.append(
-                AdaGNResBlock(prev_c, c, cond_dim)
-            )
-            self.downsamples.append(
-                nn.Conv1d(c, c, 4, stride=2, padding=1)
+                FiLMResBlock(prev_c, c, cond_dim), 
+                nn.Conv1d(c, c, 3, stride=2, padding=1) if not is_last else nn.Identity()
             )
             prev_c = c
 
         # -------------------------------
         # BOTTLENECK
         # -------------------------------
-        self.mid1 = AdaGNResBlock(channels[-1], channels[-1], cond_dim)
-        self.mid2 = AdaGNResBlock(channels[-1], channels[-1], cond_dim)
+        self.mid1 = FiLMResBlock(channels[-1], channels[-1], cond_dim, condtype=self.condtype)
+        self.mid2 = FiLMResBlock(channels[-1], channels[-1], cond_dim)
 
         # -------------------------------
         # DECODER
         # -------------------------------
-        self.upsamples = nn.ModuleList()
         self.up_blocks = nn.ModuleList()
-        in_layer = channels[-1]
-        for c in reversed(channels):
+        for i, c in enumerate(reversed(channels)):
+            is_last = i >= (len(channels) - 1)
+
+
             self.upsamples.append(
                 nn.Sequential(
-                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False),
-                    nn.Conv1d(in_layer, c, 3, padding=1)
+                    FiLMResBlock(c * 2, c, cond_dim),
+                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False) if not is_last else nn.Identity()
                 )
             )
-            self.up_blocks.append(
-                AdaGNResBlock(c * 2, c, cond_dim)
-            )
-            in_layer=c
+
 
         # -------------------------------
         # FINAL OUT
