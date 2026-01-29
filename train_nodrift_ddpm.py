@@ -130,8 +130,7 @@ def run(cfg, base_save_dir="checkpoints"):
         in_channels=5,
         channels = cfg["channels"],
         cond_dim = cfg["cond_dim"],
-        num_cond = cfg["num_cond"], 
-        condtype = cfg["cond_type"]
+        num_cond = cfg["num_cond"]
     ).to(device)
     print(model)
     optimizer = torch.optim.AdamW(
@@ -142,7 +141,8 @@ def run(cfg, base_save_dir="checkpoints"):
 
     scheduler = DDPMScheduler(
         num_train_timesteps=int(cfg["timesteps"]),
-        beta_schedule=cfg["beta_schedule"]
+        beta_schedule=cfg["beta_schedule"],
+        beta_start=1e-7
     )
 
     # === DATASET ===
@@ -164,7 +164,7 @@ def run(cfg, base_save_dir="checkpoints"):
     # === TRAINING LOOP ===
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
-        train_metrics = {"diff": 0.0, "yaw": 0.0, "goal": 0.0, "path": 0.0, "total": 0.0}
+        train_metrics = {"diff": 0.0, "yaw": 0.0, "goal": 0.0, "total": 0.0}
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch} [Train]"):
             x0 = batch["target"].to(device).permute(0, 2, 1)   # [B, C, T]

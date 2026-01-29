@@ -1,18 +1,17 @@
 lr: [1e-4]
 cond_dim: [128]
 channels:
-  - [32, 64, 128, 256]
+  - [32, 64, 128]
 
 yaw_w: [0.4]
 goal_w: [0.5]
 path_w: [0.5]
-num_cond: [3]
+num_cond: [2]
 
 path_t_thresh: [0.2]
-cond_type: ['concat', 'sum']
 
 timesteps: [1000]
-beta_schedule: ["squaredcos_cap_v2"]
+beta_schedule: ["scaled_linear"]
 batch_size: [128]
 epochs: [50, 75, 100]
 weight_decay: [1e-4]
