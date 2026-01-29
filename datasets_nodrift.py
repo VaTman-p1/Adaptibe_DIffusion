@@ -32,9 +32,9 @@ class DroneTrajectoryDataset(Dataset):
         stride_points: int = 4,
         original_freq: int = 200,
         target_freq: int = 10,
-        pos_columns=('px', 'py', 'pz'),
-        quat_columns=('qx', 'qy', 'qz', 'qw'),
-        time_column='#time(ns)',
+        pos_columns=(' p_RS_R_x [m]', ' p_RS_R_y [m]', ' p_RS_R_z [m]'),
+        quat_columns=(' q_RS_x []', ' q_RS_y []', ' q_RS_z []', ' q_RS_w []'),
+        time_column='#timestamp',
         norm_margin: float = 1.1,      
         norm_min_scale: float = 1.0      
     ):

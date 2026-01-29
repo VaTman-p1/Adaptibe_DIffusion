@@ -12,7 +12,7 @@ path_t_thresh: [0.2]
 cond_type: ['concat', 'sum']
 
 timesteps: [1000]
-beta_schedule: ["scaled_linear"]
+beta_schedule: ["squaredcos_cap_v2"]
 batch_size: [128]
 epochs: [50, 75, 100]
 weight_decay: [1e-4]

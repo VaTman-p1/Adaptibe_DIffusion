@@ -30,14 +30,14 @@ class ConditionEmbedder(nn.Module):
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmbedding(cond_dim),
             nn.Linear(cond_dim, cond_dim * 4),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(cond_dim * 4, cond_dim)
         )
         
         # 2. Энкодер цели (координаты XYZ)
         self.goal_mlp = nn.Sequential(
             nn.Linear(3, 64),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(64, cond_dim)
         )
         
@@ -45,7 +45,7 @@ class ConditionEmbedder(nn.Module):
         self.context_mlp = nn.Sequential(
             nn.Flatten(),
             nn.Linear(context_size, 256),
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(256, cond_dim)
         )
 
@@ -62,7 +62,7 @@ class FiLMResBlock(nn.Module):
         super().__init__()
         self.condtype = condtype
         self.cond_mlp = nn.Sequential(
-            nn.SiLU(),
+            nn.Mish(),
             nn.Linear(conddim, out_channels * 2) 
         )
         def get_groups(channels):
@@ -75,7 +75,7 @@ class FiLMResBlock(nn.Module):
         self.norm = nn.GroupNorm(get_groups(out_channels), out_channels)
         self.conv2 = nn.Conv1d(out_channels, out_channels, 3, padding=1)
         
-        self.act = nn.SiLU()
+        self.act = nn.Mish()
         self.skip = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x, cond):
