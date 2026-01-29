@@ -50,8 +50,19 @@ def path_loss(x0_pred, mask):
     loss = loss * weight
     return loss.sum() / (weight.sum() + 1e-8)
 
-def goal_loss(x0_pred, goal, last_point):
-    return F.mse_loss(torch.clamp(x0_pred[:, :3, last_point],-1.0,1.0), goal)  # по умолчанию reduction='mean'
+def goal_loss(x0_pred, goal, last_point_indices, tolerance=0.01):
+    batch_size = x0_pred.size(0)
+    # Извлекаем предсказанный конец
+    pred_ends = x0_pred[torch.arange(batch_size), :3, last_point_indices]
+    
+    dist = torch.norm(pred_ends - goal, dim=1) 
+    reg_dist = torch.clamp(dist - tolerance, min=0.0)
+    
+    # Используем reduction='none', чтобы получить лосс для каждого примера в батче
+    # Это позволит нам применить маску t снаружи
+    loss_per_sample = F.smooth_l1_loss(reg_dist, torch.zeros_like(reg_dist), beta=0.5, reduction='none')
+    
+    return loss_per_sample
 
 
 def flow_matching_loss(v_pred, v_target, mask):

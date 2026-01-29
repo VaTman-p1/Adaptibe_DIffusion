@@ -1,6 +1,6 @@
 import numpy as np
 
-from datetime import datetime  # ← добавь этот импорт наверху
+from datetime import datetime 
 
 from comet_ml import Experiment
 from datetime import datetime
@@ -16,7 +16,7 @@ from datasets_nodrift import build_dataset
 from model import UNet1D
 from diffusion import reconstruct_x0
 from utils import pad_to_pow2
-from lossese_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss
+from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -92,32 +92,31 @@ def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, sample_
     return
 
 
-def run(cfg, base_save_dir="/checkpoints"):
+def run(cfg, base_save_dir="checkpoints"):
     experiment = Experiment(
         api_key='',
-        project_name="diffusion-trajectory",
+        project_name="adaptive_diffusion",
         auto_param_logging=False,
         auto_metric_logging=False
     )
     experiment.log_parameters(cfg)
 
-    # === УНИКАЛЬНАЯ ПАПКА ДЛЯ ЭКСПЕРИМЕНТА ===
-    # Ключевые параметры в имени
-    exp_keys = ["lr", "channels", "goal_w", "yaw_w", "path_w", "batch_size", "timesteps"]
-    exp_name_parts = []
-    for k in exp_keys:
-        if k in cfg:
-            val = cfg[k]
-            if isinstance(val, list):
-                val = "_".join(map(str, val))
-            exp_name_parts.append(f"{k}_{val}")
-    exp_name = "_".join(exp_name_parts)
+
+    # exp_keys = ["lr", "channels", "goal_w", "yaw_w", "path_w", "batch_size", "timesteps"]
+    # exp_name_parts = []
+    # for k in exp_keys:
+    #     if k in cfg:
+    #         val = cfg[k]
+    #         if isinstance(val, list):
+    #             val = "_".join(map(str, val))
+    #         exp_name_parts.append(f"{k}_{val}")
+    # exp_name = "_".join(exp_name_parts)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = os.path.join(base_save_dir, f"{timestamp}_{exp_name}")
+    exp_dir = os.path.join(base_save_dir, f"{timestamp}_ddpm_run")
     os.makedirs(exp_dir, exist_ok=True)
 
-    best_model_path = os.path.join(exp_dir, "best_model.pt")
+    best_model_path = os.path.join(exp_dir, "weights.pt")
 
     experiment.log_parameter("exp_dir", exp_dir)
     experiment.log_parameter("best_model_path", best_model_path)
@@ -131,7 +130,8 @@ def run(cfg, base_save_dir="/checkpoints"):
         in_channels=5,
         channels = cfg["channels"],
         cond_dim = cfg["cond_dim"],
-        num_cond = cfg["num_cond"]
+        num_cond = cfg["num_cond"], 
+        condtype = cfg["cond_type"]
     ).to(device)
     print(model)
     optimizer = torch.optim.AdamW(
@@ -177,24 +177,30 @@ def run(cfg, base_save_dir="/checkpoints"):
             noise = torch.randn_like(x0)
             xt = scheduler.add_noise(x0, noise, t)
 
-            pred = model(xt, t.float()/cfg["timesteps"] , goal, context)
-            confidence = 1.0 - (t.float() / cfg["timesteps"])
-            path_confidence = torch.pow(confidence, 4)
+            pred = model(xt, t.float() , goal, context)
             x0_pred = reconstruct_x0(xt, pred, t, scheduler)
 
             diff_loss_val = diffusion_loss(pred, noise, mask)
             yaw_loss_val = yaw_loss(x0_pred, x0, mask)
-            goal_loss_val = goal_loss(x0_pred, goal, last_point)
+            goal_loss_raw = goal_loss(x0_pred, goal, last_point) # Теперь возвращает лосс для каждого элемента батча
+
+            # Создаем маску: лосс по цели считаем только если шум достаточно мал
+            # Например, если t < 20% от общего количества шагов
+            goal_mask = (t.float() < (cfg["timesteps"] * cfg["path_t_thresh"])).float() 
+
+            # Усредняем только те элементы, которые прошли через маску
+            if goal_mask.sum() > 0:
+                goal_loss_val = (goal_loss_raw * goal_mask).sum() / (goal_mask.sum() + 1e-8)
+            else:
+                goal_loss_val = torch.tensor(0.0, device=device)
 
             # path_mask = (t.float() < cfg["path_t_thresh"]).float().view(-1, 1, 1)
-            path_loss_val = path_loss(x0_pred, mask).mean()
             # path_loss_val = (path_loss_raw * path_mask).sum() / (path_mask.sum() + 1e-8)
 
             loss = (
                 diff_loss_val
-                + cfg["yaw_w"] * (yaw_loss_val * confidence).mean()
-                + cfg["goal_w"] * (goal_loss_val*  confidence).mean()
-                + cfg["path_w"] * (path_loss_val * path_confidence).mean()
+                + cfg["yaw_w"] * yaw_loss_val
+                + cfg["goal_w"] * goal_loss_val
             )
 
             optimizer.zero_grad()
@@ -204,7 +210,6 @@ def run(cfg, base_save_dir="/checkpoints"):
             train_metrics["diff"] += diff_loss_val.item()
             train_metrics["yaw"] += yaw_loss_val.item()
             train_metrics["goal"] += goal_loss_val.item()
-            train_metrics["path"] += path_loss_val.item()
             train_metrics["total"] += loss.item()
 
         # Average train metrics
@@ -273,7 +278,7 @@ def run(cfg, base_save_dir="/checkpoints"):
 
 
 if __name__ == "__main__":
-    with open("trajectory_diffusion/experiments_simple.yaml") as f:
+    with open("experiments_simple.yaml") as f:
         grid = yaml.safe_load(f)
 
     keys, values = zip(*grid.items())

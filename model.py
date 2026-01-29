@@ -27,7 +27,6 @@ class ConditionEmbedder(nn.Module):
     def __init__(self, cond_dim=128, context_size=25):
         super().__init__()
         
-        # 1. Энкодер времени (стандарт для диффузии)
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmbedding(cond_dim),
             nn.Linear(cond_dim, cond_dim * 4),
@@ -100,7 +99,7 @@ class FiLMResBlock(nn.Module):
         h = self.norm(h)
         h = self.act(h)
 
-        return h + self.skip(x), self.skip(x)
+        return h + self.skip(x)
 
 
 
@@ -118,25 +117,26 @@ class UNet1D(nn.Module):
         self.condtype = condtype
         self.in_channels = in_channels
         self.num_cond = num_cond
+        self.cond_dim = cond_dim
 
         if self.condtype == 'concat':
-            cond_dim = int(num_cond*num_cond)
+            cond_dim = int(num_cond*self.cond_dim)
 
-        self.cond_embedder = ConditionEmbedder(cond_dim=cond_dim, num_cond=num_cond)
-
+        self.cond_embedder = ConditionEmbedder(cond_dim=self.cond_dim)
+        all_dims = [in_channels] + list(channels)
+        in_out = list(zip(all_dims[:-1], all_dims[1:]))
         # -------------------------------
         # ENCODER
         # -------------------------------
         self.down_blocks = nn.ModuleList()
 
-        prev_c = self.in_channels
-        for i, c in enumerate(channels):
+        for i, (dim_in, dim_out) in enumerate(in_out):
             is_last = i >= (len(channels) - 1)
-            self.down_blocks.append(
-                FiLMResBlock(prev_c, c, cond_dim), 
-                nn.Conv1d(c, c, 3, stride=2, padding=1) if not is_last else nn.Identity()
-            )
-            prev_c = c
+            self.down_blocks.append(nn.ModuleList([
+                FiLMResBlock(dim_in, dim_out, cond_dim), 
+                nn.Conv1d(dim_out, dim_out, 3, stride=2, padding=1) if not is_last else nn.Identity()
+            ]))
+     
 
         # -------------------------------
         # BOTTLENECK
@@ -148,42 +148,50 @@ class UNet1D(nn.Module):
         # DECODER
         # -------------------------------
         self.up_blocks = nn.ModuleList()
-        for i, c in enumerate(reversed(channels)):
-            is_last = i >= (len(channels) - 1)
+        for i, (dim_in, dim_out) in enumerate(reversed(in_out)):
 
-
-            self.upsamples.append(
-                nn.Sequential(
-                    FiLMResBlock(c * 2, c, cond_dim),
-                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False) if not is_last else nn.Identity()
-                )
+        
+            is_first = (i == 0)
+            self.up_blocks.append(
+                nn.ModuleList([
+                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False) if not is_first else nn.Identity(),
+                    FiLMResBlock(dim_out + dim_out, dim_in, cond_dim)
+                ])
             )
-
-
         # -------------------------------
         # FINAL OUT
         # -------------------------------
-        self.out = nn.Conv1d(channels[0], in_channels, 1)
+        self.out = nn.Conv1d(in_channels, in_channels, 1)
 
     def forward(self, x, t, goal, context):
-        # print('.')
-        fused_cond = self.cond_embedder(t, goal, context)
+        t_e, g_e, c_e = self.cond_embedder(t, goal, context)
+        if self.condtype == 'concat':
+            fused_cond = torch.cat([t_e, g_e, c_e], dim=1)
+        else:
+            fused_cond = torch.stack([t_e, g_e, c_e], dim=1)
 
         # ---------------- ENCODER ----------------
         skips = []
         h = x
-        for block, down in zip(self.down_blocks, self.downsamples):
+        for block, downsample in self.down_blocks:
             h = block(h, fused_cond)
+            # print(h.size())
             skips.append(h)
-            h = down(h)
-
+            h = downsample(h)
+            # print(h.size())
+            # print('-'*50)
+        print('skip sizes:', [sk.size() for sk in skips])
         # ---------------- MID ----------------
         h = self.mid1(h,fused_cond)
         h = self.mid2(h,fused_cond)
+
+
         
         # ---------------- DECODER ----------------
-        for upsample, block, skip in zip(self.upsamples, self.up_blocks, reversed(skips)):
+        for upsample, block in self.up_blocks:
             h = upsample(h)
+            skip = skips.pop()
+            # print(h.size(), skip.size())
             h = torch.cat([h, skip], dim=1)
             h = block(h, fused_cond)
 
