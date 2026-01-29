@@ -180,7 +180,7 @@ class UNet1D(nn.Module):
             h = downsample(h)
             # print(h.size())
             # print('-'*50)
-        print('skip sizes:', [sk.size() for sk in skips])
+        # print('skip sizes:', [sk.size() for sk in skips])
         # ---------------- MID ----------------
         h = self.mid1(h,fused_cond)
         h = self.mid2(h,fused_cond)
