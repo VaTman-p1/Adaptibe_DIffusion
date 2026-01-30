@@ -13,7 +13,7 @@ from diffusers import DDPMScheduler
 from tqdm import tqdm
 
 from datasets_nodrift import build_dataset
-from model import UNet1D
+from model import UNet
 from diffusion import reconstruct_x0
 from utils import pad_to_pow2
 from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss
@@ -126,11 +126,12 @@ def run(cfg, base_save_dir="checkpoints"):
     print(f"Experiment directory: {exp_dir}")
 
     # === MODEL ===
-    model = UNet1D(
+    model = UNet(
         in_channels=5,
+
         channels = cfg["channels"],
         cond_dim = cfg["cond_dim"],
-        num_cond = cfg["num_cond"]
+        # num_cond = cfg["num_cond"]
     ).to(device)
     print(model)
     optimizer = torch.optim.AdamW(

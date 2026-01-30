@@ -87,7 +87,7 @@ class HistoryEncoder(nn.Module):
 # -----------------------------------------------------------------------------
 # 4. Основная UNet1D модель
 # -----------------------------------------------------------------------------
-class LocalPlannerUNet(nn.Module):
+class UNet(nn.Module):
     def __init__(self, in_channels=5, channels=[64, 128, 256], cond_dim=128, dropout=0.1):
         super().__init__()
         
@@ -113,7 +113,7 @@ class LocalPlannerUNet(nn.Module):
         )
 
         # --- Путь UNet ---
-        self.init_conv = nn.Conv1d(in_channels, channels[0], kernel_size=3, padding=1)
+        channels = [in_channels]+channels
 
         # Encoder (Downsampling)
         self.downs = nn.ModuleList()
@@ -131,7 +131,7 @@ class LocalPlannerUNet(nn.Module):
 
         # Decoder (Upsampling)
         self.ups = nn.ModuleList()
-        rev_channels = list(reversed(channels))
+        rev_channels = list(reversed(channels[1:]))
         for i in range(len(rev_channels) - 1):
             in_ch = rev_channels[i]
             out_ch = rev_channels[i+1]
@@ -170,8 +170,10 @@ class LocalPlannerUNet(nn.Module):
         for res1, res2, down in self.downs:
             h = res1(h, cond)
             h = res2(h, cond)
+            print(h.size())
             skips.append(h)
             h = down(h)
+            print(h.size())
 
         # Mid
         h = self.mid1(h, cond)
@@ -180,11 +182,8 @@ class LocalPlannerUNet(nn.Module):
         # Decoder
         for res1, res2, up in self.ups:
             h = up(h)
+            print(h.size)
             skip = skips.pop()
-            
-            # Если возникнет нестыковка (напр. если ты подашь не 32, а 21)
-            if h.shape[-1] != skip.shape[-1]:
-                h = F.interpolate(h, size=skip.shape[-1], mode='linear', align_corners=False)
             
             h = torch.cat([h, skip], dim=1)
             h = res1(h, cond)
