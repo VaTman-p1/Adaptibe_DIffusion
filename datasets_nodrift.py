@@ -29,14 +29,16 @@ class DroneTrajectoryDataset(Dataset):
         target_points: int = 21,
         target_offset_points: int = 5,
         goal_offset_points: int = 10,
-        stride_points: int = 4,
+        stride_points: int = 8,
         original_freq: int = 200,
         target_freq: int = 10,
         pos_columns=(' p_RS_R_x [m]', ' p_RS_R_y [m]', ' p_RS_R_z [m]'),
         quat_columns=(' q_RS_x []', ' q_RS_y []', ' q_RS_z []', ' q_RS_w []'),
         time_column='#timestamp',
         norm_margin: float = 1.1,      
-        norm_min_scale: float = 1.0      
+        norm_min_scale: float = 1.0,
+        fixed_scale: np.ndarray = None, # Если None, посчитаем сами
+        augment: bool = True,     
     ):
         self.norm_margin = norm_margin
         self.norm_min_scale = norm_min_scale
@@ -47,6 +49,11 @@ class DroneTrajectoryDataset(Dataset):
         self.stride_points = stride_points
         self.original_freq = original_freq
         self.target_freq = target_freq
+        self.augment = augment
+
+        
+
+        
 
         # -------------------- Load CSV --------------------
         df = pd.read_csv(csv_path)
@@ -85,6 +92,29 @@ class DroneTrajectoryDataset(Dataset):
             self.indices.append(idx)
             idx += self.stride_points  # можно менять stride_points для прореживания
         # print(ooo)
+
+
+    # -------------------- Авто-скейл --------------------
+        if fixed_scale is not None:
+            self.fixed_scale = np.array(fixed_scale)
+        else:
+            print(f"Calculating scale for {csv_path}...")
+            self.fixed_scale = self._compute_dataset_scale()
+            print(f"Scale set to: {self.fixed_scale}")
+
+    def _compute_dataset_scale(self):
+            """Проходит по всем индексам один раз и находит максимумы"""
+            all_maxes = []
+            # Пройдем по индексам с шагом (чтобы было быстрее)
+            for i in range(0, len(self.indices), 10): 
+                raw = self._generate_sample(self.indices[i])
+                pts = np.concatenate([raw['ctx_pos'], raw['tgt_pos'], raw['goal_pos'][None, :]], axis=0)
+                all_maxes.append(np.max(np.abs(pts), axis=0))
+            
+            # Берем максимум и добавляем 10% запаса
+            return np.max(all_maxes, axis=0) * 1.1
+    
+
     def __len__(self):
         return len(self.indices)
 
@@ -127,42 +157,34 @@ class DroneTrajectoryDataset(Dataset):
         goal_row = self.df.iloc[goal_idx]
         goal_pos_local = self._to_local_frame(goal_row[['x','y','z']].values, ego_pos, R_local)
 
-        return {
-                    'ctx_pos': ctx_pos_local,          # np.array [C, 3]
-                    'ctx_sincos': ctx_sincos,          # np.array [C, 2]
-                    'tgt_pos': tgt_pos_local,          # np.array [T, 3]
-                    'tgt_sincos': tgt_sincos,          # np.array [T, 2]
-                    'goal_pos': goal_pos_local         # np.array [3]
-                }
-    def _normalize_sample(self, raw_sample: dict) -> dict:
-        ctx_pos = raw_sample['ctx_pos']      # [C, 3]
-        tgt_pos = raw_sample['tgt_pos']      # [T, 3]
-        goal_pos = raw_sample['goal_pos']    # [3]
-
-        # Все позиции вместе
-        all_pos = np.concatenate([ctx_pos, tgt_pos, goal_pos[None, :]], axis=0)  # [total, 3]
-
-        # Max abs по каждой оси отдельно
-        max_abs_per_axis = np.max(np.abs(all_pos), axis=0)  # [3]
-
-        # Scale по осям с margin и min
-        scale_per_axis = np.maximum(self.norm_min_scale, max_abs_per_axis * self.norm_margin)  # [3]
-
-        # Нормализуем (broadcasting)
-        ctx_pos_norm = ctx_pos / scale_per_axis
-        tgt_pos_norm = tgt_pos / scale_per_axis
-        goal_pos_norm = goal_pos / scale_per_axis
-
-        # Собираем тензоры
-        context = np.concatenate([ctx_pos_norm, raw_sample['ctx_sincos']], axis=1)
-        target = np.concatenate([tgt_pos_norm, raw_sample['tgt_sincos']], axis=1)
+        if self.augment and np.random.rand() > 0.5:
+                    ctx_pos_local[:, 1] *= -1
+                    tgt_pos_local[:, 1] *= -1
+                    goal_pos_local[1] *= -1
+                    ctx_sincos[:, 0] *= -1
+                    tgt_sincos[:, 0] *= -1
 
         return {
-            'context': torch.tensor(context, dtype=torch.float32),
-            'target': torch.tensor(target, dtype=torch.float32),
-            'goal': torch.tensor(goal_pos_norm, dtype=torch.float32),
-            'scale': torch.tensor(scale_per_axis, dtype=torch.float32)  # теперь [3] для денормализации
+            'ctx_pos': ctx_pos_local, 'ctx_sincos': ctx_sincos,
+            'tgt_pos': tgt_pos_local, 'tgt_sincos': tgt_sincos,
+            'goal_pos': goal_pos_local
         }
+    
+
+    def _normalize_sample(self, raw_sample: dict) -> dict:
+        # Теперь scale ВСЕГДА фиксирован для этого объекта
+        scale = self.fixed_scale
+        
+        return {
+            'context': torch.tensor(np.concatenate([raw_sample['ctx_pos'] / scale, raw_sample['ctx_sincos']], axis=1), dtype=torch.float32),
+            'target': torch.tensor(np.concatenate([raw_sample['tgt_pos'] / scale, raw_sample['tgt_sincos']], axis=1), dtype=torch.float32),
+            'goal': torch.tensor(raw_sample['goal_pos'] / scale, dtype=torch.float32),
+            'scale': torch.tensor(scale, dtype=torch.float32)
+        }
+    
+
+
+
 
     # ================== __getitem__ ==================
     def __getitem__(self, idx):
@@ -173,4 +195,19 @@ class DroneTrajectoryDataset(Dataset):
 
 
 def build_dataset(cfgs):
-    return ConcatDataset([DroneTrajectoryDataset(**cfg) for cfg in cfgs])
+    # 1. Сначала считаем общий скейл по всем конфигам
+    all_scales = []
+    for cfg in cfgs:
+        temp_ds = DroneTrajectoryDataset(**cfg, augment=False)
+        all_scales.append(temp_ds.fixed_scale)
+    
+    global_scale = np.max(all_scales, axis=0)
+    print(f"Global scale for all datasets: {global_scale}")
+
+    # 2. Создаем реальные датасеты с общим скейлом
+    datasets = []
+    for cfg in cfgs:
+        # Передаем посчитанный глобальный скейл принудительно
+        datasets.append(DroneTrajectoryDataset(**cfg, fixed_scale=global_scale))
+    
+    return ConcatDataset(datasets)

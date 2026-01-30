@@ -1,7 +1,7 @@
-lr: [1e-4]
-cond_dim: [128]
+lr: [2e-4]
+cond_dim: [64]
 channels:
-  - [32, 64, 128]
+  - [32, 64]
 
 yaw_w: [0.4]
 goal_w: [0.5]
@@ -13,7 +13,7 @@ path_t_thresh: [0.2]
 timesteps: [1000]
 beta_schedule: ["scaled_linear"]
 batch_size: [128]
-epochs: [50, 75, 100]
+epochs: [50]
 weight_decay: [1e-4]
 
 dataset:

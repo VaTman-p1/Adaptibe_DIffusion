@@ -48,7 +48,7 @@ class Conv1dBlock(nn.Module):
         Conv1d --> GroupNorm --> Mish
     '''
 
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+    def __init__(self, inp_channels, out_channels, kernel_size, p = 0.1, n_groups=8):
         super().__init__()
         n_groups = min(n_groups, out_channels)
 
@@ -58,7 +58,7 @@ class Conv1dBlock(nn.Module):
             nn.GroupNorm(n_groups, out_channels),
             Rearrange('b c 1 h -> b c h'),
             nn.Mish(),
-        )
+            nn.Dropout1d(p))
 
     def forward(self, x):
         return self.block(x)

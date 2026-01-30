@@ -94,7 +94,7 @@ def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, sample_
 
 def run(cfg, base_save_dir="checkpoints"):
     experiment = Experiment(
-        api_key='',
+        api_key='NXUBEZL5VrY1FNYOQpa5xiyP9',
         project_name="adaptive_diffusion",
         auto_param_logging=False,
         auto_metric_logging=False
@@ -142,7 +142,7 @@ def run(cfg, base_save_dir="checkpoints"):
     scheduler = DDPMScheduler(
         num_train_timesteps=int(cfg["timesteps"]),
         beta_schedule=cfg["beta_schedule"],
-        beta_start=1e-7
+        beta_start=1e-6
     )
 
     # === DATASET ===
