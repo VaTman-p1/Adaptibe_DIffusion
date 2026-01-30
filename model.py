@@ -1,192 +1,158 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
+from einops.layers.torch import Rearrange
+from conv_blocks import SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock
+
 
 # -----------------------------------------------------------------------------
-# 1. Позиционное кодирование времени (для диффузии)
+# 2. Модуляция и Условия
 # -----------------------------------------------------------------------------
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
 
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
-
-# -----------------------------------------------------------------------------
-# 2. Блоки FiLM и ResNet
-# -----------------------------------------------------------------------------
 class FiLM(nn.Module):
     def __init__(self, cond_dim, out_channels):
         super().__init__()
         self.cond_mlp = nn.Sequential(
-            nn.Mish(),
+            nn.SiLU(),
             nn.Linear(cond_dim, out_channels * 2)
         )
-
     def forward(self, h, cond):
-        # h: [B, C, T], cond: [B, cond_dim]
-        stats = self.cond_mlp(cond).unsqueeze(-1) # [B, 2*C, 1]
-        scale, shift = torch.chunk(stats, 2, dim=1)
-        return h * (1 + scale) + shift
+        scale, shift = torch.chunk(self.cond_mlp(cond), 2, dim=-1)
+        h = h * (1 + scale[..., None]) + shift[..., None]
+        return h
 
-class FiLMResBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, cond_dim, dropout=0.1):
-        super().__init__()
-        self.block1 = nn.Sequential(
-            nn.Conv1d(in_ch, out_ch, 3, padding=1),
-            nn.GroupNorm(8, out_ch),
-            nn.Mish()
-        )
-        self.film = FiLM(cond_dim, out_ch)
-        self.block2 = nn.Sequential(
-            nn.Conv1d(out_ch, out_ch, 3, padding=1),
-            nn.GroupNorm(8, out_ch),
-            nn.Mish(),
-            nn.Dropout(dropout)
-        )
-        self.residual = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-    def forward(self, x, cond):
-        h = self.block1(x)
-        h = self.film(h, cond)
-        h = self.block2(h)
-        return h + self.residual(x)
-
-# -----------------------------------------------------------------------------
-# 3. Temporal History Encoder (Вместо простого Flatten)
-# -----------------------------------------------------------------------------
 class HistoryEncoder(nn.Module):
-    """Извлекает признаки динамики из 5 последних стейтов"""
+    """Сверточный энкодер для 5 стейтов истории (вместо Flatten)"""
     def __init__(self, in_channels=5, out_dim=128):
         super().__init__()
         self.net = nn.Sequential(
-            # Вход: [B, 5 признаков, 5 шагов]
             nn.Conv1d(in_channels, 64, kernel_size=3, padding=1),
-            nn.Mish(),
+            nn.SiLU(),
             nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.Mish(),
+            nn.SiLU(),
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten()
         )
         self.out = nn.Linear(128, out_dim)
 
     def forward(self, x):
-        # Если x пришел как [B, 25], превращаем в [B, 5, 5]
-        if len(x.shape) == 2:
+        if len(x.shape) == 2: # Если пришло [B, 25]
             x = x.view(-1, 5, 5) 
         return self.out(self.net(x))
 
-# -----------------------------------------------------------------------------
-# 4. Основная UNet1D модель
-# -----------------------------------------------------------------------------
-class UNet(nn.Module):
-    def __init__(self, in_channels=5, channels=[64, 128, 256], cond_dim=128, dropout=0.1):
+class ConditionEmbedder(nn.Module):
+    def __init__(self, cond_dim=128, context_size=25, in_channels=5):
         super().__init__()
-        
-        # --- Эмбеддинги условий ---
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(cond_dim),
-            nn.Linear(cond_dim, cond_dim * 4),
-            nn.Mish(),
+            nn.Linear(cond_dim, cond_dim * 4), nn.SiLU(),
             nn.Linear(cond_dim * 4, cond_dim)
         )
         self.goal_mlp = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.Mish(),
+            nn.Linear(3, 64), nn.SiLU(),
             nn.Linear(64, cond_dim)
         )
-        self.history_enc = HistoryEncoder(in_channels=in_channels, out_dim=cond_dim)
-        
-        # Слияние всех условий в один вектор для FiLM
-        self.cond_fusion = nn.Sequential(
-            nn.Linear(cond_dim * 3, cond_dim * 2),
-            nn.Mish(),
-            nn.Linear(cond_dim * 2, cond_dim)
-        )
+        self.context_encoder = HistoryEncoder(in_channels=in_channels, out_dim=cond_dim)
 
-        # --- Путь UNet ---
-        channels = [in_channels]+channels
+    def forward(self, t, goal, context):
+        return self.time_mlp(t), self.goal_mlp(goal), self.context_encoder(context)
 
-        # Encoder (Downsampling)
-        self.downs = nn.ModuleList()
-        for i in range(len(channels)-1):
-            self.downs.append(nn.ModuleList([
-                FiLMResBlock(channels[i], channels[i+1], cond_dim, dropout),
-                FiLMResBlock(channels[i+1], channels[i+1], cond_dim, dropout),
-                nn.Conv1d(channels[i+1], channels[i+1], 3, stride=2, padding=1)
+# -----------------------------------------------------------------------------
+# 3. Основные Блоки UNet
+# -----------------------------------------------------------------------------
+
+class FiLMResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, embed_dim):
+        super().__init__()
+        self.block1 = Conv1dBlock(in_ch, out_ch, 3)
+        self.block2 = Conv1dBlock(out_ch, out_ch, 3)
+        self.film = FiLM(embed_dim, out_ch)
+        self.residual = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, emb):
+        h = self.block1(x)
+        h = self.film(h, emb)
+        h = self.block2(h)
+        return h + self.residual(x)
+
+class UNet1D(nn.Module):
+    def __init__(self, 
+                 in_channels=5, 
+                 channels=[64, 128, 256], 
+                 cond_dim=128):
+        super().__init__()
+        self.cond_dim = cond_dim
+        self.cond_embedder = ConditionEmbedder(cond_dim=cond_dim, in_channels=in_channels)
+        self.cond_fusion = nn.Linear(cond_dim * 3, cond_dim)
+        all_dims = [in_channels] + list(channels)
+        in_out = list(zip(all_dims[:-1], all_dims[1:]))
+
+        # ENCODER
+        self.down_blocks = nn.ModuleList()
+
+        for i, (dim_in, dim_out) in enumerate(in_out):
+            is_last = i >= (len(channels) - 1)
+            self.down_blocks.append(nn.ModuleList([
+                FiLMResBlock(dim_in, dim_out, self.cond_dim),
+                FiLMResBlock(dim_out, dim_out, self.cond_dim),
+                Downsample1d(dim_out) if not is_last else nn.Identity()
             ]))
 
-        # Bottleneck
+        # BOTTLENECK
         mid_dim = channels[-1]
-        self.mid1 = FiLMResBlock(mid_dim, mid_dim, cond_dim, dropout)
-        self.mid2 = FiLMResBlock(mid_dim, mid_dim, cond_dim, dropout)
+        self.mid1 = FiLMResBlock(mid_dim, mid_dim, cond_dim)
+        self.mid2 = FiLMResBlock(mid_dim, mid_dim, cond_dim)
 
-        # Decoder (Upsampling)
-        self.ups = nn.ModuleList()
-        rev_channels = list(reversed(channels[1:]))
-        for i in range(len(rev_channels) - 1):
-            in_ch = rev_channels[i]
-            out_ch = rev_channels[i+1]
-            self.ups.append(nn.ModuleList([
-                FiLMResBlock(in_ch + out_ch, out_ch, cond_dim, dropout),
-                FiLMResBlock(out_ch, out_ch, cond_dim, dropout),
-                nn.ConvTranspose1d(out_ch, out_ch, 4, stride=2, padding=1)
+        # DECODER (Исправленный порядок и каналы)
+        self.up_blocks = nn.ModuleList()
+        for i, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = i >= (len(in_out) - 1)
+
+            self.up_blocks.append(nn.ModuleList([
+                FiLMResBlock(dim_out * 2, dim_in, self.cond_dim),
+                FiLMResBlock(dim_in, dim_in, self.cond_dim),
+                Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
 
-        # Финальный выход
-        self.final_conv = nn.Sequential(
-            nn.Conv1d(channels[0], channels[0], 3, padding=1),
-            nn.GroupNorm(8, channels[0]),
-            nn.Mish(),
+
+        # FINAL
+        self.final_out = nn.Sequential(
+            Conv1dBlock(channels[0], channels[0], 3),
             nn.Conv1d(channels[0], in_channels, 1)
         )
 
-    def forward(self, x, t, goal, history):
-        """
-        x: [B, 5, 32] - зашумленная траектория (уже дополненная до 32)
-        t: [B] - таймстеп
-        goal: [B, 3] - x, y, z цели
-        history: [B, 25] - 5 прошлых стейтов
-        """
-        # 1. Собираем условие
-        t_e = self.time_mlp(t)
-        g_e = self.goal_mlp(goal)
-        h_e = self.history_enc(history)
-        cond = self.cond_fusion(torch.cat([t_e, g_e, h_e], dim=-1))
+    def forward(self, x, t, goal, context):
+        # 1. Общие условия
+        t_e, g_e, c_e = self.cond_embedder(t, goal, context)
+        proj_cond = self.cond_fusion(torch.cat([t_e, g_e, c_e], dim=-1))
 
-        # 2. UNet
-        h = self.init_conv(x)
+        # 2. ENCODER
         skips = []
+        h = x
+      
+        for block1, block2, downsample in self.down_blocks:
+            h = block1(h, proj_cond)
+            h = block2(h, proj_cond)
+            # print(h.size())
+            skips.append(h) # Сохраняем промежуточные стейты
+            h = downsample(h)
+            # print(h.size())
 
-        # Encoder
-        for res1, res2, down in self.downs:
-            h = res1(h, cond)
-            h = res2(h, cond)
-            print(h.size())
-            skips.append(h)
-            h = down(h)
-            print(h.size())
+        # 3. MID
+        h = self.mid1(h, proj_cond)
+        h = self.mid2(h, proj_cond)
 
-        # Mid
-        h = self.mid1(h, cond)
-        h = self.mid2(h, cond)
-
-        # Decoder
-        for res1, res2, up in self.ups:
-            h = up(h)
-            print(h.size)
-            skip = skips.pop()
+        # 4. DECODER
+        for  block1, block2, upsample in self.up_blocks:
+            # print('-'*10)
+            # print(h.size())
             
+            # print(h.size())
+            skip = skips.pop()
             h = torch.cat([h, skip], dim=1)
-            h = res1(h, cond)
-            h = res2(h, cond)
+            h = block1(h, proj_cond)
+            h = block2(h, proj_cond)
+            h = upsample(h)
 
-        return self.final_conv(h)
+        return self.final_out(h)

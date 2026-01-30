@@ -73,3 +73,20 @@ def flow_matching_loss(v_pred, v_target, mask):
     weight = mask.expand_as(v_pred)
     loss = F.mse_loss(v_pred, v_target, reduction='none')
     return (loss * weight).sum() / (weight.sum() + 1e-8)
+
+
+def smoothness_loss(x0_pred, mask):
+    coords = x0_pred[:, :3, :]
+    # Ускорение (вторая разность)
+    accel = coords[:, :, 2:] - 2 * coords[:, :, 1:-1] + coords[:, :, :-2]
+    
+    # Маска паддинга (учитываем, что длина стала T-2)
+    m = mask[:, :, 2:].expand_as(accel)
+    
+    # Считаем MSE, но НЕ усредняем по батчу (dim=0 оставляем)
+    # loss_per_sample будет иметь размер [B]
+    loss_per_sample = (F.mse_loss(accel * m, torch.zeros_like(accel), reduction='none')).sum(dim=(1, 2)) 
+    # Нормируем на количество непустых точек в каждом примере
+    loss_per_sample = loss_per_sample / (m.sum(dim=(1, 2)) + 1e-8)
+    
+    return loss_per_sample

@@ -1,19 +1,20 @@
-lr: [2e-4]
+lr: [2e-4, 1.5e-4]
 cond_dim: [128]
 channels:
-  - [64,128,512]
+  - [64,128,256]
 
 yaw_w: [0.4]
-goal_w: [0.5]
+goal_w: [0.2]
 path_w: [0.5]
 num_cond: [2]
+smooth_w: [0.5, 1]
 
 path_t_thresh: [0.2]
 
 timesteps: [1000]
 beta_schedule: ["scaled_linear"]
 batch_size: [128]
-epochs: [50]
+epochs: [100]
 weight_decay: [1e-4]
 
 dataset:

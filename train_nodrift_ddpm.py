@@ -13,25 +13,25 @@ from diffusers import DDPMScheduler
 from tqdm import tqdm
 
 from datasets_nodrift import build_dataset
-from model import UNet
+from model import UNet1D
 from diffusion import reconstruct_x0
 from utils import pad_to_pow2
-from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss
+from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss, smoothness_loss
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import gc
 
 
-def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, sample_idx=0):
+def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, traj_size = 21, sample_idx=0):
     """
     Визуализация всех 8 каналов траектории отдельно для одного примера.
     """
     # Импорты matplotlib УЖЕ должны быть в начале скрипта с matplotlib.use('Agg')
     
     # Выбираем один пример из батча
-    gt = x0_gt[sample_idx].cpu().numpy()  # [C, T]
-    pred = x0_pred[sample_idx].cpu().numpy()  # [C, T]
+    gt = x0_gt[sample_idx].cpu().numpy()[:, :traj_size]  # [C, T]
+    pred = x0_pred[sample_idx].cpu().numpy()[:, :traj_size]  # [C, T]
     
     assert gt.shape[0] == 5, f"Ожидается 5 каналов, получено {gt.shape[0]}"
     
@@ -126,7 +126,7 @@ def run(cfg, base_save_dir="checkpoints"):
     print(f"Experiment directory: {exp_dir}")
 
     # === MODEL ===
-    model = UNet(
+    model = UNet1D(
         in_channels=5,
 
         channels = cfg["channels"],
@@ -165,7 +165,7 @@ def run(cfg, base_save_dir="checkpoints"):
     # === TRAINING LOOP ===
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
-        train_metrics = {"diff": 0.0, "yaw": 0.0, "goal": 0.0, "total": 0.0}
+        train_metrics = {"diff": 0.0, "yaw": 0.0, "goal": 0.0, 'smoothness':0.0, "total": 0.0}
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch} [Train]"):
             x0 = batch["target"].to(device).permute(0, 2, 1)   # [B, C, T]
@@ -178,22 +178,25 @@ def run(cfg, base_save_dir="checkpoints"):
             noise = torch.randn_like(x0)
             xt = scheduler.add_noise(x0, noise, t)
 
-            pred = model(xt, t.float() , goal, context)
+            pred = model(xt, t.float()/cfg["timesteps"] , goal, context)
             x0_pred = reconstruct_x0(xt, pred, t, scheduler)
 
             diff_loss_val = diffusion_loss(pred, noise, mask)
             yaw_loss_val = yaw_loss(x0_pred, x0, mask)
-            goal_loss_raw = goal_loss(x0_pred, goal, last_point) # Теперь возвращает лосс для каждого элемента батча
+            goal_loss_raw = goal_loss(x0_pred, goal, last_point) 
+            smooth_loss_raw = smoothness_loss(x0_pred, mask)
 
             # Создаем маску: лосс по цели считаем только если шум достаточно мал
             # Например, если t < 20% от общего количества шагов
-            goal_mask = (t.float() < (cfg["timesteps"] * cfg["path_t_thresh"])).float() 
+            ts_mask = (t.float() < (cfg["timesteps"] * cfg["path_t_thresh"])).float() 
 
             # Усредняем только те элементы, которые прошли через маску
-            if goal_mask.sum() > 0:
-                goal_loss_val = (goal_loss_raw * goal_mask).sum() / (goal_mask.sum() + 1e-8)
+            if ts_mask.sum() > 0:
+                goal_loss_val = (goal_loss_raw * ts_mask).sum() / (ts_mask.sum() + 1e-8)
+                smooth_loss_val = (smooth_loss_raw * ts_mask).sum() / (ts_mask.sum() + 1e-8)
             else:
                 goal_loss_val = torch.tensor(0.0, device=device)
+                smooth_loss_val = torch.tensor(0.0, device=device)
 
             # path_mask = (t.float() < cfg["path_t_thresh"]).float().view(-1, 1, 1)
             # path_loss_val = (path_loss_raw * path_mask).sum() / (path_mask.sum() + 1e-8)
@@ -202,6 +205,7 @@ def run(cfg, base_save_dir="checkpoints"):
                 diff_loss_val
                 + cfg["yaw_w"] * yaw_loss_val
                 + cfg["goal_w"] * goal_loss_val
+                + cfg["smooth_w"]*smooth_loss_val
             )
 
             optimizer.zero_grad()
@@ -211,6 +215,7 @@ def run(cfg, base_save_dir="checkpoints"):
             train_metrics["diff"] += diff_loss_val.item()
             train_metrics["yaw"] += yaw_loss_val.item()
             train_metrics["goal"] += goal_loss_val.item()
+            train_metrics["smoothness"] += smooth_loss_val.item()
             train_metrics["total"] += loss.item()
 
         # Average train metrics
