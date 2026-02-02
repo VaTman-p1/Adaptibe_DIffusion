@@ -30,8 +30,10 @@ class SinusoidalPosEmb(nn.Module):
 class Downsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.Conv1d(dim, dim, 3, 2, 1)
-
+        self.conv = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='linear', allign_corners=False),
+            nn.Conv1d(dim, dim, 3, padding=1)
+        )
     def forward(self, x):
         return self.conv(x)
 
@@ -45,10 +47,10 @@ class Upsample1d(nn.Module):
 
 class Conv1dBlock(nn.Module):
     '''
-        Conv1d --> GroupNorm --> Mish
+        Conv1d --> GroupNorm --> SiLU
     '''
 
-    def __init__(self, inp_channels, out_channels, kernel_size, p = 0.1, n_groups=8):
+    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
         super().__init__()
         n_groups = min(n_groups, out_channels)
 
@@ -57,8 +59,7 @@ class Conv1dBlock(nn.Module):
             Rearrange('b c h -> b c 1 h'),
             nn.GroupNorm(n_groups, out_channels),
             Rearrange('b c 1 h -> b c h'),
-            nn.Mish(),
-            nn.Dropout1d(p))
+            nn.SiLU())
 
     def forward(self, x):
         return self.block(x)
