@@ -13,10 +13,10 @@ import os
 
 def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Сравнение GT и сгенерированной траектории"):
     """
-    Визуализирует сравнение ground truth и сгенерированной моделью траектории.
+    Визуализирует сравнение ground truth и сгенерированной моделью траектории без дрифта.
     Args:
         gt_sample: исходный сэмпл из датасета (может быть нормализованным или денормализованным).
-        generated_sample: результат работы модели после денормализации (словарь с 'positions', 'orientations', 'drifts').
+        generated_sample: результат работы модели после денормализации (словарь с 'positions', 'orientations').
         title: заголовок графика.
     """
     # Обработка GT сэмпла
@@ -31,10 +31,9 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
         goal = gt_sample['goal']
         scale = gt_sample['scale'] if 'scale' in gt_sample else np.array([1.0, 1.0, 1.0])
     
-    # Позиции GT
+    # Позиции GT (без дрифта)
     ctx_pos = context[:, :3] * scale  # денормализуем контекст
     tgt_pos_clean = target[:, :3] * scale  # идеальная траектория
-    tgt_pos_drift = target[:, 5:8] * scale  # сдвинутая траектория (дрейф)
     
     # Yaw GT
     ctx_yaw = np.arctan2(context[:, 3], context[:, 4])
@@ -45,34 +44,28 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
     ego_yaw = ctx_yaw[-1]
     
     # Подготовка данных для визуализации
-    all_positions = [ctx_pos, tgt_pos_clean, tgt_pos_drift, goal[None, :]]
+    all_positions = [ctx_pos, tgt_pos_clean, goal[None, :]]
     
     # Если есть сгенерированные данные
     if generated_sample is not None:
         # Обработка сгенерированного сэмпла
         gen_positions = generated_sample['positions'].cpu().numpy()  # [seq_len, 3] или [batch_size, seq_len, 3]
         gen_orientations = generated_sample['orientations'].cpu().numpy()  # [seq_len, 2] или [batch_size, seq_len, 2]
-        gen_drifts = generated_sample['drifts'].cpu().numpy()  # [seq_len, 3] или [batch_size, seq_len, 3]
         
         # Если батч размер больше 1, берем первый элемент
         if len(gen_positions.shape) == 3:
             gen_positions = gen_positions[0]
             gen_orientations = gen_orientations[0]
-            gen_drifts = gen_drifts[0]
-        
-        # Вычисляем сдвинутую траекторию для сгенерированных данных
-        gen_pos_drift = gen_positions + gen_drifts
         
         # Yaw из сгенерированных ориентаций
         gen_yaw = np.arctan2(gen_orientations[:, 0], gen_orientations[:, 1])
         
         # Добавляем сгенерированные позиции для расчета диапазона
-        all_positions.extend([gen_positions, gen_pos_drift])
+        all_positions.extend([gen_positions])
         
         # Сохраняем для визуализации
         gen_data = {
             'positions': gen_positions,
-            'drift_positions': gen_pos_drift,
             'yaw': gen_yaw
         }
     else:
@@ -94,10 +87,10 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
         line=dict(color='royalblue', width=5),
         marker=dict(size=7, color='royalblue', symbol='circle'),
         hoverinfo='text',
-        text=[f'Контекст t={i}, yaw={np.degrees(y):.1f}°'
-              for i, y in enumerate(ctx_yaw)]
+        # text=[f'Контекст t={i}, yaw={np.degrees(y):.1f}°'
+        #       for i, y in enumerate(ctx_yaw)]
     ))
-    
+    print(tgt_pos_clean.shape)
     # 2. Идеальная цель (GT)
     fig.add_trace(go.Scatter3d(
         x=tgt_pos_clean[:,0], y=tgt_pos_clean[:,1], z=tgt_pos_clean[:,2],
@@ -106,23 +99,11 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
         line=dict(color='crimson', width=5, dash='dash'),
         marker=dict(size=7, color='crimson'),
         hoverinfo='text',
-        text=[f'GT pos=({x:.2f},{y:.2f},{z:.2f})'
-              for x, y, z in tgt_pos_clean.T]
+        # text=[f'GT pos=({x:.2f},{y:.2f},{z:.2f})'
+        #       for x, y, z in tgt_pos_clean.T]
     ))
-    
-    # 3. Сдвинутая цель (GT)
-    fig.add_trace(go.Scatter3d(
-        x=tgt_pos_drift[:,0], y=tgt_pos_drift[:,1], z=tgt_pos_drift[:,2],
-        mode='lines+markers',
-        name='Сдвинутая цель (GT)',
-        line=dict(color='purple', width=5),
-        marker=dict(size=7, color='purple'),
-        hoverinfo='text',
-        text=[f'GT drift pos=({x:.2f},{y:.2f},{z:.2f})'
-              for x, y, z in tgt_pos_drift.T]
-    ))
-    
-    # 4. Цель (goal)
+
+    # 3. Цель (goal)
     fig.add_trace(go.Scatter3d(
         x=[goal[0]], y=[goal[1]], z=[goal[2]],
         mode='markers',
@@ -132,7 +113,7 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
         text=['Цель (goal)']
     ))
     
-    # 5. Эгоцентр
+    # 4. Эгоцентр
     fig.add_trace(go.Scatter3d(
         x=[ego_pos[0]], y=[ego_pos[1]], z=[ego_pos[2]],
         mode='markers',
@@ -142,7 +123,7 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
         text=[f'Эгоцентр, yaw = {np.degrees(ego_yaw):.1f}°']
     ))
     
-    # 6. Сгенерированная моделью траектория (если есть)
+    # 5. Сгенерированная моделью траектория (если есть)
     if gen_data is not None:
         # Идеальная сгенерированная траектория
         fig.add_trace(go.Scatter3d(
@@ -152,23 +133,11 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
             line=dict(color='limegreen', width=5, dash='solid'),
             marker=dict(size=7, color='limegreen'),
             hoverinfo='text',
-            text=[f'Generated pos=({x:.2f},{y:.2f},{z:.2f})'
-                  for x, y, z in gen_data['positions'].T]
-        ))
-        
-        # Сдвинутая сгенерированная траектория
-        fig.add_trace(go.Scatter3d(
-            x=gen_data['drift_positions'][:,0], y=gen_data['drift_positions'][:,1], z=gen_data['drift_positions'][:,2],
-            mode='lines+markers',
-            name='Сдвинутая цель (Сгенерировано)',
-            line=dict(color='orange', width=5, dash='solid'),
-            marker=dict(size=7, color='orange'),
-            hoverinfo='text',
-            text=[f'Generated drift pos=({x:.2f},{y:.2f},{z:.2f})'
-                  for x, y, z in gen_data['drift_positions'].T]
+            # text=[f'Generated pos=({x:.2f},{y:.2f},{z:.2f})'
+            #       for x, y, z in gen_data['positions'].T]
         ))
     
-    # 7. Стрелки направления yaw
+    # 6. Стрелки направления yaw
     def add_yaw_arrows(fig, pos, yaws, color, name_prefix, showlegend=True):
         arrow_length = (max_v - min_v).max() * 0.05  # адаптивная длина стрелки
         dx = np.cos(yaws) * arrow_length
@@ -193,12 +162,10 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
     # Стрелки для GT
     add_yaw_arrows(fig, ctx_pos, ctx_yaw, 'royalblue', 'Контекст GT')
     add_yaw_arrows(fig, tgt_pos_clean, tgt_yaw_clean, 'crimson', 'GT Идеал')
-    add_yaw_arrows(fig, tgt_pos_drift, tgt_yaw_clean, 'purple', 'GT Дрейф')
     
     # Стрелки для сгенерированных данных
     if gen_data is not None:
         add_yaw_arrows(fig, gen_data['positions'], gen_data['yaw'], 'limegreen', 'Сгенерировано Идеал')
-        add_yaw_arrows(fig, gen_data['drift_positions'], gen_data['yaw'], 'orange', 'Сгенерировано Дрейф')
     
     # Настройки графика
     fig.update_layout(
@@ -228,17 +195,16 @@ def sample_ddim(
     scale: torch.Tensor,
     cfg: Dict[str, Any],
     num_inference_steps: int = 20,
-    eta: float = 0.0,
+    eta: float = 0.1,
     generator_seed: int = None,
 ) -> Dict[str, torch.Tensor]:
     """
-    Генерирует траекторию с помощью DDIM сэмплера.
-    Note: Убраны неиспользуемые параметры (force), исправлен in_channels на 8, улучшена структура.
+    Генерирует траекторию с помощью DDIM сэмплера (без дрифта).
     """
     device = next(model.parameters()).device
     scheduler = DDPMScheduler(
-        num_train_timesteps=100,
-        beta_schedule="squaredcos_cap_v2",
+        num_train_timesteps=1000,
+        beta_schedule="scaled_linear",
         prediction_type="epsilon",
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
@@ -274,15 +240,14 @@ def sample_ddim(
             timestep=t,
             sample=x,
             generator=generator,
-            eta=eta,
-            use_clipped_model_output=True
+            # use_clipped_model_output=True
         ).prev_sample
     
     # Берем только нужную длину последовательности
-    generated_raw = x[:, :, :seq_len]  # [batch_size, 8, seq_len]
+    generated_raw = x[:, :, :seq_len]  # [batch_size, 5, seq_len]
     
     # Денормализуем результат
-    return denormalize_sample(generated_raw, scale)
+    return denormalize_sample(generated_raw, scale, goal)
 
 @torch.no_grad()
 def sample_flow_matching(
@@ -295,14 +260,8 @@ def sample_flow_matching(
     num_steps: int = 50,
     generator_seed: int = None,
 ) -> Dict[str, torch.Tensor]:
-    """
-    Генерирует траекторию с помощью Flow Matching (простая Euler интеграция ODE).
-    Предполагается, что модель предсказывает velocity/flow v_t(x).
-    Если модель обучена на diffusion, потребуется переобучение или адаптация.
-    """
     device = next(model.parameters()).device
     batch_size = goal.shape[0]
-    print(device)
     generator = None
     if generator_seed is not None:
         generator = torch.Generator(device=device).manual_seed(generator_seed)
@@ -321,27 +280,27 @@ def sample_flow_matching(
     
     dt = 1.0 / num_steps
     for i in tqdm(range(num_steps), desc=f"Flow Matching · {num_steps} шагов"):
-        t_val = i * dt
+        t_val = 1.0 - (i * dt)  # from ~1 to ~0
         t_tensor = torch.full((batch_size,), t_val, device=device, dtype=torch.float)
         v = model(
             x,
-            t_tensor,  # Предполагаем t в [0,1], без /1000; адаптировать если нужно
+            t_tensor,  
             goal,
             context,
         )
-        x = x + v * dt
+        x = x - v * dt  # reverse direction with -v
     
     # Берем только нужную длину последовательности
     generated_raw = x[:, :, :seq_len]  # [batch_size, 8, seq_len]
     
     # Денормализуем результат
-    return denormalize_sample(generated_raw, scale)
+    return denormalize_sample(generated_raw, scale, goal)
 
-def denormalize_sample(input_tensor: torch.Tensor, scale: torch.Tensor) -> Dict[str, torch.Tensor]:
+def denormalize_sample(input_tensor: torch.Tensor, scale: torch.Tensor, goal: torch.Tensor) -> Dict[str, torch.Tensor]:
     """
-    Денормализует выход модели.
+    Денормализует выход модели (без дрифта).
     Args:
-        input_tensor: [batch_size, 8, seq_len]
+        input_tensor: [batch_size, 5, seq_len]
         scale: [3] или [batch_size, 3]
     Returns:
         Словарь с денормализованными тензорами в формате [batch_size, seq_len, channels]
@@ -353,30 +312,30 @@ def denormalize_sample(input_tensor: torch.Tensor, scale: torch.Tensor) -> Dict[
     elif scale.dim() == 2:  # [batch_size, 3]
         scale = scale.unsqueeze(2)  # [batch_size, 3, 1]
     scale = scale.to(device)
+    goal = goal.to(device)
     
-    # Переставляем размерности: [batch_size, seq_len, 8]
+    # Переставляем размерности: [batch_size, seq_len, 5]
     input_tensor = input_tensor.permute(0, 2, 1)
     
     # Извлекаем компоненты
     tgt_pos_norm = input_tensor[..., :3]  # [batch_size, seq_len, 3]
     tgt_sincos = input_tensor[..., 3:5]  # [batch_size, seq_len, 2]
-    tgt_drift_norm = input_tensor[..., 5:8]  # [batch_size, seq_len, 3]
     
     scale = scale.permute(0, 2, 1)
     
     # Денормализуем
     tgt_pos_denorm = tgt_pos_norm * scale  # [batch_size, seq_len, 3]
-    tgt_drift_denorm = tgt_drift_norm * scale  # [batch_size, seq_len, 3]
+    goal = goal*scale
     
     return {
         'positions': tgt_pos_denorm,  # [batch_size, seq_len, 3]
         'orientations': tgt_sincos,  # [batch_size, seq_len, 2]
-        'drifts': tgt_drift_denorm  # [batch_size, seq_len, 3]
+        'goal': goal
     }
 
 def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, method='ddim'):
     """
-    Демонстрация: берет сэмпл из датасета, генерирует траекторию моделью, визуализирует сравнение.
+    Демонстрация: берет сэмпл из датасета, генерирует траекторию моделью (без дрифта), визуализирует сравнение.
     Добавлен параметр method для выбора 'ddim' или 'flow'.
     """
     print(f"Загружаем сэмпл №{idx} из датасета...")
@@ -396,7 +355,7 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
             model=model,
             goal=goal,
             context=context,
-            in_channels=8,
+            in_channels=5,
             seq_len=21,
             scale=scale,
             cfg=cfg,
@@ -412,7 +371,7 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
             in_channels=5,
             seq_len=21,
             scale=scale,
-            num_steps=20,
+            num_steps=10,
             generator_seed=seed
         )
     else:
@@ -421,11 +380,7 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
     print(f"Время генерации: {end_time - start_time:.2f} сек")
     
     # 4. Получаем исходный (денормализованный) сэмпл для сравнения
-    raw_sample = dataset.get_sample(
-        idx=idx,
-        normalize=False,
-        custom_raw_drift=np.array([2, 2, 2])  # используем тот же дрейф
-    )
+    raw_sample = dataset[idx]
     
     # 5. Визуализируем сравнение
     print("Визуализация результатов...")
@@ -442,32 +397,33 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
     }
 
 # Основной код
-# 1. Загружаем датасет (предполагаем, что build_dataset возвращает DroneTrajectoryDataset)
-dataset = build_dataset('trajectory_diffusion/V2_02_medium.csv')  # Исправлено на build_dataset для соответствия импорту
+# 1. Загружаем датасет (предполагаем, что build_dataset возвращает DroneTrajectoryDataset без дрифта)
+ # Исправлено на build_dataset для соответствия импорту
 
 # 2. Загружаем конфигурацию
-config_path = 'trajectory_diffusion/checkpoints/' \
-    '20260116_173356_lr_2e-4_channels_64_128_256_goal_w_0.05_yaw_w_0.2_path_w_0.05_consist_w_0.2_vconsist_w_0.2_batch_size_256_timesteps_1000/' \
-    'config.yaml'
+config_path = 'experiments_simple.yaml'
 with open(config_path, 'r') as f:
     cfg = yaml.safe_load(f)
 print("Конфиг загружен:")
-print(cfg)
+# print(cfg)
 
-# 3. Создаем модель (исправлен in_channels на 8, используем параметры из cfg если возможно)
+# print(cfg['dataset'][0][0])
+dataset = build_dataset(cfg['dataset'][0]) 
+
+
+# 3. Создаем модель (in_channels=5 без дрифта)
 # Предполагаем, что cfg содержит 'model' с ключами; иначе хардкод
-model_channels = cfg.get.get('channels', [64, 128, 256])
-model_cond_dim = cfg.get.get('cond_dim', 128)
+model_channels = cfg.get('channels', [[64, 128, 256]])
+model_cond_dim = cfg.get('cond_dim', 128)
+# print(model_channels)
 model = UNet1D(
-    in_channels=5,  # Исправлено на 8 (pos3 + sincos2 + drift3)
-    cond_dim=model_cond_dim,
-    channels=model_channels
+    in_channels=5,  # pos3 + sincos2 = 5 (без дрифта)
+    cond_dim=model_cond_dim[0],
+    channels=model_channels[0]
 )
 
-# 4. Загружаем веса
-checkpoint_path = 'trajectory_diffusion/checkpoints/' \
-    '20260116_173356_lr_2e-4_channels_64_128_256_goal_w_0.05_yaw_w_0.2_path_w_0.05_consist_w_0.2_vconsist_w_0.2_batch_size_256_timesteps_1000/' \
-    'weights.pt'
+# 4. Загружаем веса (предполагаем, что модель обучена без дрифта; если нет, нужно переобучить)
+checkpoint_path = 'checkpoints/20260131_152058_ddpm_run/last_weights.pt'
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 model.load_state_dict(checkpoint)
 
@@ -483,7 +439,7 @@ results = demo_sampling_and_visualization(
     dataset=dataset,
     model=model,
     cfg=cfg,
-    idx=3568,  # номер сэмпла из датасета
+    idx=2874,  # номер сэмпла из датасета
     seed=42,  # seed для воспроизводимости
     method='ddim'  # или 'flow'
 )

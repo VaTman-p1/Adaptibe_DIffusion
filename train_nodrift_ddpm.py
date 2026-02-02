@@ -116,10 +116,12 @@ def run(cfg, base_save_dir="checkpoints"):
     exp_dir = os.path.join(base_save_dir, f"{timestamp}_ddpm_run")
     os.makedirs(exp_dir, exist_ok=True)
 
-    best_model_path = os.path.join(exp_dir, "weights.pt")
+    best_model_path = os.path.join(exp_dir, "best_weights.pt")
+    last_model_path = os.path.join(exp_dir, "last_weights.pt")
 
     experiment.log_parameter("exp_dir", exp_dir)
     experiment.log_parameter("best_model_path", best_model_path)
+    experiment.log_parameter("last_model_path", last_model_path)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -217,6 +219,9 @@ def run(cfg, base_save_dir="checkpoints"):
             train_metrics["goal"] += goal_loss_val.item()
             train_metrics["smoothness"] += smooth_loss_val.item()
             train_metrics["total"] += loss.item()
+
+        torch.save(model.state_dict(), last_model_path)
+        experiment.log_asset(last_model_path)
 
         # Average train metrics
         for k in train_metrics:

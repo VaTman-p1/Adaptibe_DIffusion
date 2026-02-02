@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from utils import ot_pairing
 
 def diffusion_loss(pred, noise, mask):
     """
@@ -90,3 +91,25 @@ def smoothness_loss(x0_pred, mask):
     loss_per_sample = loss_per_sample / (m.sum(dim=(1, 2)) + 1e-8)
     
     return loss_per_sample
+
+
+def ot_flow_matching_loss(v_pred, x0, x1, t, mask):
+    """
+    Pure OT Flow Matching loss (no time weighting)
+    """
+
+    # OT pairing
+    x0_ot, x1_ot = ot_pairing(x0, x1)
+
+    # Interpolation
+    xt = (1 - t[:, None, None]) * x0_ot + t[:, None, None] * x1_ot
+
+    # Target velocity
+    v_target = x1_ot - x0_ot
+
+    mask = mask.float()[:, :1, :].expand_as(v_pred)
+
+    loss = ((v_pred - v_target) ** 2) * mask
+    loss = loss.sum() / (mask.sum() + 1e-8)
+
+    return loss, xt

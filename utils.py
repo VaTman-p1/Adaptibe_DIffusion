@@ -16,3 +16,18 @@ def pad_to_pow2(x):
 
     x = F.pad(x, (0, pad), mode="replicate")
     return x, mask, last_point
+
+
+def ot_pairing(x0, x1):
+    """
+    Approximate OT pairing by sorting batch samples.
+    x0, x1: [B, C, T]
+    """
+    B = x0.size(0)
+    score0 = x0.view(B, -1).mean(dim=1)
+    score1 = x1.view(B, -1).mean(dim=1)
+
+    idx0 = torch.argsort(score0)
+    idx1 = torch.argsort(score1)
+
+    return x0[idx0], x1[idx1]
