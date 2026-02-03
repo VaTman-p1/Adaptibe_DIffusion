@@ -145,7 +145,8 @@ def run(cfg, base_save_dir="checkpoints"):
     scheduler = DDPMScheduler(
         num_train_timesteps=int(cfg["timesteps"]),
         beta_schedule=cfg["beta_schedule"],
-        beta_start=1e-6
+        beta_start=1e-7,
+        beta_end=0.02
     )
 
     # === DATASET ===
@@ -180,7 +181,7 @@ def run(cfg, base_save_dir="checkpoints"):
             noise = torch.randn_like(x0)
             xt = scheduler.add_noise(x0, noise, t)
 
-            pred = model(xt, t.float()/cfg["timesteps"] , goal, context)
+            pred = model(xt, t.float(), goal, context)
             x0_pred = reconstruct_x0(xt, pred, t, scheduler)
 
             diff_loss_val = diffusion_loss(pred, noise, mask)
