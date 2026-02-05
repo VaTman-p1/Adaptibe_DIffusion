@@ -113,3 +113,28 @@ def ot_flow_matching_loss(v_pred, x0, x1, t, mask):
     loss = loss.sum() / (mask.sum() + 1e-8)
 
     return loss, xt
+
+
+# def reconstruction_loss(x0_pred, x0_true, mask):
+#     """
+#     L1 или MSE Loss прямо на координаты траектории.
+#     """
+#     weight = mask.expand_as(x0_pred)
+#     # Используем Smooth L1 (Huber) - он стабильнее MSE для координат
+#     loss = F.smooth_l1_loss(x0_pred, x0_true, reduction='none', beta=0.001)
+#     loss = loss * weight
+#     return loss.sum() / (weight.sum() + 1e-8)
+
+
+def reconstruction_loss(pred, target, mask):
+    # Ошибка для каждой точки: [B, 5, T]
+    # loss = F.smooth_l1_loss(pred, target, reduction='none', beta=0.001)
+    loss = F.mse_loss(pred, target, reduction='none')
+    
+    # Маскируем контекст и паддинг: [B, 5, T]
+    weighted_loss = loss * mask.expand_as(loss)
+    
+    # Суммируем всё КРОМЕ батча: [B]
+    # Делим на количество активных точек в маске для каждого примера
+    per_sample_loss = weighted_loss.sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) * pred.size(1) + 1e-8)
+    return per_sample_loss # Теперь на выходе тензор размера [B]

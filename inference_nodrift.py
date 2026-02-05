@@ -10,6 +10,7 @@ from model import UNet1D
 import time
 import yaml
 import os
+import torch.nn.functional as F
 
 def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Сравнение GT и сгенерированной траектории"):
     """
@@ -186,7 +187,7 @@ def visualize_gt_vs_generated(gt_sample, generated_sample=None, title="Срав�
     iplot(fig)
 
 @torch.no_grad()
-def sample_ddim(
+def sample_ddpm(
     model: torch.nn.Module,
     goal: torch.Tensor,
     context: torch.Tensor,
@@ -195,20 +196,22 @@ def sample_ddim(
     scale: torch.Tensor,
     cfg: Dict[str, Any],
     num_inference_steps: int = 20,
-    eta: float = 0.1,
     generator_seed: int = None,
 ) -> Dict[str, torch.Tensor]:
     """
-    Генерирует траекторию с помощью DDIM сэмплера (без дрифта).
+    Генерирует траекторию с помощью DDPM сэмплера (без дрифта).
     """
     device = next(model.parameters()).device
     scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
+        num_train_timesteps=200,
         beta_schedule="scaled_linear",
         prediction_type="epsilon",
+        beta_start=1e-7,
+        beta_end=0.02
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
     timesteps = scheduler.timesteps
+    print(timesteps)
     
     batch_size = goal.shape[0]
     generator = None
@@ -221,7 +224,7 @@ def sample_ddim(
         (batch_size, in_channels, gen_seq),
         device=device,
         generator=generator
-    ) * scheduler.init_noise_sigma
+    ) 
     
     # Перемещаем все входные данные на устройство
     goal = goal.to(device)
@@ -231,10 +234,11 @@ def sample_ddim(
         t_tensor = torch.full((batch_size,), t.item(), device=device, dtype=torch.long)
         pred_noise = model(
             x,
-            t_tensor.float() / 1000,
+            t_tensor.float() / 200,
             goal,
             context,
         )
+
         x = scheduler.step(
             model_output=pred_noise,
             timestep=t,
@@ -248,6 +252,89 @@ def sample_ddim(
     
     # Денормализуем результат
     return denormalize_sample(generated_raw, scale, goal)
+
+@torch.no_grad()
+def sample_ddpm_reconstruction(
+    model: torch.nn.Module,
+    goal: torch.Tensor,
+    context: torch.Tensor,
+    in_channels: int,
+    target: torch.Tensor,  # Существующая траектория для восстановления
+    seq_len: int,
+    scale: torch.Tensor,
+    cfg: Dict[str, Any],
+    num_inference_steps: int = 20,
+    strength: float = 0.1,  # 0.0 - оригинал, 1.0 - полный шум
+    generator_seed: int = None,
+) -> Dict[str, torch.Tensor]:
+    """
+    Восстанавливает траекторию, добавляя шум к target и прогоняя через DDPM.
+    """
+    device = next(model.parameters()).device
+    
+    # 1. Настройка шедулера (те же параметры, что при обучении)
+    scheduler = DDPMScheduler(
+        num_train_timesteps=200,
+        beta_schedule="scaled_linear",
+        prediction_type="epsilon",
+        beta_start=1e-7,
+        beta_end=0.02
+    )
+    scheduler.set_timesteps(num_inference_steps, device=device)
+    
+    batch_size = goal.shape[0]
+    generator = None
+    if generator_seed is not None:
+        generator = torch.Generator(device=device).manual_seed(generator_seed)
+
+    # 2. Подготовка target (нормализация и padding)
+    # Предполагаем, что target уже в том же пространстве, что и выход модели (нормализован)
+    # Если нет, его нужно нормализовать функцией, обратной denormalize_sample
+    
+    # Округляем до степени 2, как в оригинале
+    gen_seq = 1 << (seq_len - 1).bit_length()
+    print(gen_seq)
+    target = target.permute(0,2,1)
+    x_padded = F.pad(target, (0, gen_seq-seq_len), mode="replicate")
+    # target_padded = torch.zeros((batch_size, in_channels, gen_seq), device=device)
+    # target_padded[:, :, :seq_len] = target.to(device)
+
+    # 3. Определяем стартовый шаг
+    # strength=0.8 означает, что мы пропустим первые 20% шагов денойзинга и начнем с 80% зашумления
+    init_timestep = int(num_inference_steps * strength)
+    t_start = scheduler.timesteps[num_inference_steps - init_timestep]
+    
+    # 4. Зашумляем оригинал до уровня t_start
+    noise = torch.randn(x_padded.shape, device=device, generator=generator)
+    x = scheduler.add_noise(x_padded, noise, t_start)
+
+    # 5. Цикл денойзинга (начинаем не с начала, а с t_start)
+    timesteps = scheduler.timesteps[num_inference_steps - init_timestep:]
+    
+    goal = goal.to(device)
+    context = context.to(device)
+    
+    for t in tqdm(timesteps, desc=f"Reconstruction · {len(timesteps)} шагов"):
+        t_tensor = torch.full((batch_size,), t.item(), device=device, dtype=torch.long)
+        
+        pred_noise = model(
+            x,
+            t_tensor.float() / 200,
+            goal,
+            context,
+        )
+
+        x = scheduler.step(
+            model_output=pred_noise,
+            timestep=t,
+            sample=x,
+            generator=generator,
+        ).prev_sample
+    
+    # 6. Обрезка и денормализация
+    generated_raw = x[:, :, :seq_len]
+    return denormalize_sample(generated_raw, scale, goal)
+
 
 @torch.no_grad()
 def sample_flow_matching(
@@ -343,6 +430,7 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
     normalized_sample = dataset[idx]  # это уже нормализованный сэмпл
     
     # 2. Подготавливаем данные для модели
+    target = normalized_sample['target'].unsqueeze(0)
     context = normalized_sample['context'].unsqueeze(0)  # [1, C, 5]
     goal = normalized_sample['goal'].unsqueeze(0)  # [1, 3]
     scale = normalized_sample['scale']  # [3]
@@ -350,8 +438,8 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
     # 3. Генерируем траекторию
     print(f"Генерируем траекторию моделью ({method})...")
     start_time = time.time()
-    if method == 'ddim':
-        generated_output = sample_ddim(
+    if method == 'ddpm':
+        generated_output = sample_ddpm(
             model=model,
             goal=goal,
             context=context,
@@ -359,10 +447,24 @@ def demo_sampling_and_visualization(dataset, model, cfg, idx=200, seed=42, metho
             seq_len=21,
             scale=scale,
             cfg=cfg,
-            num_inference_steps=20,
-            eta=0.1,
+            num_inference_steps=200,
             generator_seed=seed
         )
+
+    elif method == 'reconstruct':
+        generated_output = sample_ddpm_reconstruction(
+            model=model,
+            goal=goal,
+            target=target,
+            context=context,
+            in_channels=5,
+            seq_len=21,
+            scale=scale,
+            cfg=cfg,
+            strength=0.5,
+            num_inference_steps=200,
+            generator_seed=seed)
+        
     elif method == 'flow':
         generated_output = sample_flow_matching(
             model=model,
@@ -408,7 +510,7 @@ print("Конфиг загружен:")
 # print(cfg)
 
 # print(cfg['dataset'][0][0])
-dataset = build_dataset(cfg['dataset'][0]) 
+dataset = build_dataset(cfg['dataset'][0], augment=False) 
 
 
 # 3. Создаем модель (in_channels=5 без дрифта)
@@ -423,7 +525,7 @@ model = UNet1D(
 )
 
 # 4. Загружаем веса (предполагаем, что модель обучена без дрифта; если нет, нужно переобучить)
-checkpoint_path = 'checkpoints/20260131_152058_ddpm_run/last_weights.pt'
+checkpoint_path = 'checkpoints/20260203_111328_ddpm_run/last_weights.pt'
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 model.load_state_dict(checkpoint)
 
@@ -441,5 +543,5 @@ results = demo_sampling_and_visualization(
     cfg=cfg,
     idx=2874,  # номер сэмпла из датасета
     seed=42,  # seed для воспроизводимости
-    method='ddim'  # или 'flow'
+    method='reconstruct'  # или 'flow'
 )

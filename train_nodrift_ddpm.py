@@ -16,11 +16,13 @@ from datasets_nodrift import build_dataset
 from model import UNet1D
 from diffusion import reconstruct_x0
 from utils import pad_to_pow2
-from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss, smoothness_loss
+from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss, smoothness_loss, reconstruction_loss
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import gc
+import torch
+import torch.nn.functional as F
 
 
 def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, traj_size = 21, sample_idx=0):
@@ -146,7 +148,8 @@ def run(cfg, base_save_dir="checkpoints"):
         num_train_timesteps=int(cfg["timesteps"]),
         beta_schedule=cfg["beta_schedule"],
         beta_start=1e-7,
-        beta_end=0.02
+        beta_end=0.02,
+        prediction_type="sample"
     )
 
     # === DATASET ===
@@ -181,10 +184,12 @@ def run(cfg, base_save_dir="checkpoints"):
             noise = torch.randn_like(x0)
             xt = scheduler.add_noise(x0, noise, t)
 
-            pred = model(xt, t.float(), goal, context)
-            x0_pred = reconstruct_x0(xt, pred, t, scheduler)
+            x0_pred = model(xt, t.float(), goal, context)
+            # pred = model(xt, t.float(), goal, context)
+            # x0_pred = reconstruct_x0(xt, pred, t, scheduler)
 
-            diff_loss_val = diffusion_loss(pred, noise, mask)
+            # diff_loss_val = diffusion_loss(pred, noise, mask)
+            diff_loss_val = reconstruction_loss(x0_pred, x0, mask)
             yaw_loss_val = yaw_loss(x0_pred, x0, mask)
             goal_loss_raw = goal_loss(x0_pred, goal, last_point) 
             smooth_loss_raw = smoothness_loss(x0_pred, mask)
@@ -245,10 +250,11 @@ def run(cfg, base_save_dir="checkpoints"):
                 noise = torch.randn_like(x0)
                 xt = scheduler.add_noise(x0, noise, t)
 
-                pred = model(xt, t.float() / cfg["timesteps"], goal, context)
-                x0_pred = reconstruct_x0(xt, pred, t, scheduler)
+                x0_pred = model(xt, t.float(), goal, context)
+                pred = model(xt, t.float(), goal, context)
+                # x0_pred = reconstruct_x0(xt, pred, t, scheduler)
 
-                diff_loss_val = diffusion_loss(pred, noise, mask)
+                diff_loss_val = reconstruction_loss(x0_pred, x0, mask)
                 val_total += diff_loss_val.item()
 
                 if (epoch%5==0 or epoch==1) and idx == r_i:

@@ -1,0 +1,25 @@
+# Параметры траектории и нормализации
+dataset_params:
+  context_points: 5
+  target_points: 24
+  target_offset_points: 3
+  goal_offset_points: 50
+  target_freq: 10
+  stride_points: 3
+  time_horizon_scale: 2.1
+  augment: true
+
+# Список файлов и срезы (start/end в индексах строк)
+data_sources:
+  - path: /home/ivan/Desktop/sets/office_building.txt
+    start: 2600
+    end: 25000
+  - path:  /home/ivan/Desktop/sets/office_building.txt
+    start: 30000
+    end: 46000
+  - path: /home/ivan/Desktop/sets/factory.txt
+    start: 3000
+    end: null # null означает до конца файла
+  - path: /home/ivan/Desktop/sets/factory2.txt
+    start: 2000
+    end: null # null означает до конца файла

@@ -28,8 +28,8 @@ class DroneTrajectoryDataset(Dataset):
         context_points: int = 5,
         target_points: int = 21,
         target_offset_points: int = 5,
-        goal_offset_points: int = 10,
-        stride_points: int = 8,
+        goal_offset_points: int = 4,
+        stride_points: int = 5,
         original_freq: int = 200,
         target_freq: int = 10,
         pos_columns=(' p_RS_R_x [m]', ' p_RS_R_y [m]', ' p_RS_R_z [m]'),
@@ -194,11 +194,11 @@ class DroneTrajectoryDataset(Dataset):
         return normalized_sample
 
 
-def build_dataset(cfgs):
+def build_dataset(cfgs, augment = False):
     # 1. Сначала считаем общий скейл по всем конфигам
     all_scales = []
     for cfg in cfgs:
-        temp_ds = DroneTrajectoryDataset(**cfg, augment=False)
+        temp_ds = DroneTrajectoryDataset(**cfg, augment=augment)
         all_scales.append(temp_ds.fixed_scale)
     
     global_scale = np.max(all_scales, axis=0)
@@ -208,6 +208,6 @@ def build_dataset(cfgs):
     datasets = []
     for cfg in cfgs:
         # Передаем посчитанный глобальный скейл принудительно
-        datasets.append(DroneTrajectoryDataset(**cfg, fixed_scale=global_scale))
+        datasets.append(DroneTrajectoryDataset(**cfg, fixed_scale=global_scale, augment=augment))
     
     return ConcatDataset(datasets)

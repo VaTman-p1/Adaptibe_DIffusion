@@ -1,0 +1,270 @@
+import numpy as np
+
+from datetime import datetime 
+
+from comet_ml import Experiment
+from datetime import datetime
+import yaml
+import itertools
+import os
+import torch
+from torch.utils.data import DataLoader, random_split
+from diffusers import DDPMScheduler
+from tqdm import tqdm
+
+from tum_dataset import build_dataset,DroneTUMDataset
+from simple_model import GoalTimeConditionedUNet1D
+from diffusion import reconstruct_x0
+from utils import pad_to_pow2
+from losses_nodrift import diffusion_loss, yaw_loss, goal_loss, path_loss, smoothness_loss, reconstruction_loss
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import gc
+import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
+
+
+def reconstruct_x0(xt, epsilon_pred, t, scheduler):
+    # Assuming prediction_type="epsilon" (noise), compute x0
+    # From DDPM formula: x0 = (xt - sqrt(1 - alpha_cumprod) * epsilon) / sqrt(alpha_cumprod)
+    alpha_cumprod_t = scheduler.alphas_cumprod[t]
+    sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod_t)[:, None, None]
+    sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod_t)[:, None, None]
+    x0 = (xt - sqrt_one_minus_alpha_cumprod * epsilon_pred) / sqrt_alpha_cumprod
+    return x0
+
+def visualize_all_channels(x0_gt, x0_pred, epoch, batch_idx, experiment, sample_idx=0):
+    # Simple 3D trajectory visualization for xyz, and separate plots for sin/cos yaw
+    gt = x0_gt[sample_idx].cpu().numpy()  # (C, T) -> (5, T)
+    pred = x0_pred[sample_idx].cpu().numpy()
+
+    fig = plt.figure(figsize=(12, 8))
+    
+    # 3D plot for xyz
+    ax = fig.add_subplot(221, projection='3d')
+    ax.plot(gt[0], gt[1], gt[2], label='GT Trajectory', color='blue')
+    ax.plot(pred[0], pred[1], pred[2], label='Pred Trajectory', color='red')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.legend()
+    ax.set_title('XYZ Trajectory')
+
+    # Sin yaw
+    ax2 = fig.add_subplot(222)
+    ax2.plot(gt[3], label='GT sin(yaw)', color='blue')
+    ax2.plot(pred[3], label='Pred sin(yaw)', color='red')
+    ax2.legend()
+    ax2.set_title('Sin Yaw')
+
+    # Cos yaw
+    ax3 = fig.add_subplot(223)
+    ax3.plot(gt[4], label='GT cos(yaw)', color='blue')
+    ax3.plot(pred[4], label='Pred cos(yaw)', color='red')
+    ax3.legend()
+    ax3.set_title('Cos Yaw')
+
+    # # Yaw angle (atan2(sin, cos))
+    # gt_yaw = np.arctan2(gt[3], gt[4])
+    # pred_yaw = np.arctan2(pred[3], pred[4])
+    # ax4 = fig.add_subplot(224)
+    # ax4.plot(gt_yaw, label='GT Yaw', color='blue')
+    # ax4.plot(pred_yaw, label='Pred Yaw', color='red')
+    # ax4.legend()
+    # ax4.set_title('Yaw Angle (radians)')
+
+    # plt.tight_layout()
+    
+    # Save and log
+    viz_path = f"viz_epoch{epoch}_batch{batch_idx}_sample{sample_idx}.png"
+    plt.savefig(viz_path)
+    experiment.log_image(viz_path, name=f"viz_epoch{epoch}")
+    plt.close()
+
+
+def run(cfg, base_save_dir="checkpoints"):
+    experiment = Experiment(
+        api_key='NXUBEZL5VrY1FNYOQpa5xiyP9',
+        project_name="adaptive_diffusion_new",
+        auto_param_logging=False,
+        auto_metric_logging=False
+    )
+    experiment.log_parameters(cfg)
+
+
+    # exp_keys = ["lr", "channels", "goal_w", "yaw_w", "path_w", "batch_size", "timesteps"]
+    # exp_name_parts = []
+    # for k in exp_keys:
+    #     if k in cfg:
+    #         val = cfg[k]
+    #         if isinstance(val, list):
+    #             val = "_".join(map(str, val))
+    #         exp_name_parts.append(f"{k}_{val}")
+    # exp_name = "_".join(exp_name_parts)
+    global_params=cfg['dataset_params']
+    data_sources = cfg['data_sources']
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = os.path.join(base_save_dir, f"{timestamp}_ddpm_run")  # assuming base_save_dir defined
+    os.makedirs(exp_dir, exist_ok=True)
+    best_model_path = os.path.join(exp_dir, "best_weights.pt")
+    last_model_path = os.path.join(exp_dir, "last_weights.pt")
+    experiment.log_parameter("exp_dir", exp_dir)
+    experiment.log_parameter("best_model_path", best_model_path)
+    experiment.log_parameter("last_model_path", last_model_path)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    print(f"Experiment directory: {exp_dir}")
+
+    # === MODEL ===
+
+    # === MODEL ===
+    model = GoalTimeConditionedUNet1D(
+        state_channels=5,
+        goal_channels=3,
+        base_channels=cfg["base_channel"],
+        emb_dim=cfg["emb_dim"],
+        num_levels=cfg["num_levels"]
+    ).to(device)
+    print(model)
+    dataset = DroneTUMDataset(txt_path=data_sources['path'], start_idx=data_sources.get('start', 0), 
+                                end_idx=data_sources.get('end', None), fixed_scale=[1,1,1], 
+                                **global_params)
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=float(cfg["lr"]),
+        weight_decay=float(cfg["weight_decay"])
+    )
+
+    scheduler = DDPMScheduler(
+        num_train_timesteps=int(cfg["timesteps"]),
+        beta_schedule=cfg["beta_schedule"],
+        beta_start=1e-7,
+        beta_end=0.02,
+        # prediction_type="epsilon"
+    )
+
+    # === DATASET ===
+    # dataset = build_dataset(cfg["dataset"])
+    # for i, ds in enumerate(dataset.datasets):
+    #     print(f"Subdataset {i} length after stride: {len(ds)}")
+    # print(f"Total dataset length: {len(dataset)}")
+
+    val_size = max(1, int(0.1 * len(dataset)))
+    train_size = len(dataset) - val_size
+    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_ds, batch_size=int(cfg["batch_size"]), shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=int(cfg["batch_size"]), shuffle=False)
+
+    best_val_loss = float("inf")
+
+    # === TRAINING LOOP ===
+    for epoch in range(1, cfg["epochs"] + 1):
+        model.train()
+        train_metrics = {"diff": 0.0}
+
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch} [Train]"):
+            x0 = batch["target"].to(device).permute(0, 2, 1)  # [B, C, T]
+            goal = batch["goal"].to(device)
+            context = batch["context"].to(device).permute(0, 2, 1)  # [B, C, H]
+
+            t = torch.randint(0, cfg["timesteps"], (x0.size(0),), device=device)
+            noise = torch.randn_like(x0)
+            xt = scheduler.add_noise(x0, noise, t)
+
+            pred = model(xt, goal, t.float())
+
+            diff_loss_val = F.mse_loss(pred, noise)
+            loss = diff_loss_val
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_metrics["diff"] += diff_loss_val.item()
+
+        # Average train metrics
+        for k in train_metrics:
+            train_metrics[k] /= len(train_loader)
+            experiment.log_metric(f"train/{k}", train_metrics[k], step=epoch)
+
+        torch.save(model.state_dict(), last_model_path)
+        experiment.log_asset(last_model_path)
+
+        # === VALIDATION ===
+        model.eval()
+        val_total = 0.0
+        num_batches = len(val_loader)
+        with torch.no_grad():
+            r_i = torch.randint(0, num_batches, (1,)).item()
+            for idx, batch in enumerate(tqdm(val_loader, desc=f"Epoch {epoch} [Val]")):
+                x0 = batch["target"].to(device).permute(0, 2, 1)
+                goal = batch["goal"].to(device)
+                context = batch["context"].to(device).permute(0, 2, 1)
+
+                t = torch.randint(0, cfg["timesteps"], (x0.size(0),), device=device)
+                noise = torch.randn_like(x0)
+                xt = scheduler.add_noise(x0, noise, t)
+
+                pred = model(xt, goal, t.float())
+
+                diff_loss_val = F.mse_loss(pred, noise)
+                val_total += diff_loss_val.item()
+
+                if (epoch % 5 == 0 or epoch == 1) and idx == r_i:
+                    x0_pred = reconstruct_x0(xt, pred, t, scheduler)
+                    mask = (t < (cfg["timesteps"] * cfg["path_t_thresh"]))
+                    if mask.any():
+                        sample_idx = torch.randint(0, x0.size(0), (1,)).item()
+                        visualize_all_channels(
+                            x0_gt=x0,
+                            x0_pred=x0_pred,
+                            epoch=epoch,
+                            batch_idx=idx,
+                            experiment=experiment,
+                            sample_idx=sample_idx
+                        )
+
+        avg_val_loss = val_total / len(val_loader)
+        experiment.log_metric("val/loss", avg_val_loss, step=epoch)
+
+        # === SAVE BEST MODEL (overwrite in own folder) ===
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), best_model_path)
+            experiment.log_asset(best_model_path)
+            print(f"🎉 New best model saved: {best_model_path} | Val loss: {best_val_loss:.6f}")
+
+        print(f"Epoch {epoch:03d} | Train diff: {train_metrics['diff']:.6f} | "
+            f"Val loss: {avg_val_loss:.6f} | Best val: {best_val_loss:.6f}")
+
+    print(f"Experiment finished. Best model: {best_model_path}")
+    experiment.end()
+
+
+if __name__ == "__main__":
+    with open("simple_experiment_new.yaml") as f:
+        full_grid = yaml.safe_load(f)
+
+    # Отделяем параметры датасета, которые не участвуют в Grid Search
+    data_sources = full_grid.pop('data_sources')
+    dataset_params = full_grid.pop('dataset_params')
+
+    keys, values = zip(*full_grid.items())
+    
+    for combo in itertools.product(*values):
+        cfg = dict(zip(keys, combo))
+        
+        # Возвращаем датасет в конфиг каждой итерации
+        cfg['data_sources'] = data_sources[0]
+
+        print(dataset_params)
+        cfg['dataset_params'] = dataset_params
+        
+        run(cfg)

@@ -1,0 +1,13 @@
+{
+    "global_scale": 4.72590961743175,
+    "params": {
+        "context_points": 5,
+        "target_points": 24,
+        "target_offset_points": 3,
+        "goal_offset_points": 50,
+        "target_freq": 10,
+        "stride_points": 3,
+        "time_horizon_scale": 2.1,
+        "augment": true
+    }
+}
